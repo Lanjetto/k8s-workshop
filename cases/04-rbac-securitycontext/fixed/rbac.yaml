@@ -1,0 +1,65 @@
+# Кто такой сервис для кластера и что ему разрешено.
+#
+# ЭТО НЕ РЕКВИЗИТ, А ПОЛОВИНА КЕЙСА. Файл применяется дважды и с разным
+# смыслом:
+#
+#   * на шаге «почти починил» (README.md, 3.3) — и НЕ ПОМОГАЕТ, потому что
+#     под ходит под учёткой `default`. Роль при этом написана правильно:
+#     доказательство — реальный запрос от имени учётки,
+#
+#         kubectl -n case04 get configmap app-config --as=system:serviceaccount:case04:api
+#
+#     он проходит, а приложение всё равно получает 403. Отсюда главный урок:
+#     права отдельно, предъявитель отдельно.
+#
+#   * вместе с той самой строкой `serviceAccountName` в шаблоне пода
+#     (README.md, 4.2) — и тогда работает. Строка ставится командой:
+#
+#         kubectl set serviceaccount -n case04 deploy/api api
+#
+#     именно она «подписывает» под своей учёткой. Без неё файл бесполезен.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: api
+# Токен этой учётки автоматически приедет в под, как только он её назовёт.
+# Никаких паролей и секретов заводить не надо — и это тоже стоит проговорить.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: config-reader
+rules:
+  # Одно правило и ровно под задачу: прочитать ОДИН конкретный ConfigMap.
+  #
+  # `resourceNames` сужает правило до объекта с таким именем — это самая
+  # узкая форма, которая в RBAC вообще есть. Без неё правило читалось бы
+  # как «все ConfigMap namespace-а»: работает так же, но выдаёт лишнее.
+  # Цена сужения — verb `list` с resourceNames не работает (перечисление
+  # не знает имён заранее), поэтому здесь только `get`. Для приложения,
+  # которое ходит за своим конфигом по имени, этого достаточно.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["app-config"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: config-reader
+subjects:
+  # ВАЖНО ПРО namespace. У субъекта ServiceAccount в RoleBinding namespace
+  # можно не писать — подставится namespace самого биндинга. Здесь он
+  # написан явно, потому что кейс про точность: адресат у прав такой же
+  # обязательный параметр, как и само правило.
+  #
+  # В ClusterRoleBinding так уже не получится: там namespace обязателен
+  # всегда, иначе привязка молча не привяжется никуда.
+  - kind: ServiceAccount
+    name: api
+    namespace: case04
+roleRef:
+  kind: Role
+  name: config-reader
+  apiGroup: rbac.authorization.k8s.io

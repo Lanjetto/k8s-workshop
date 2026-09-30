@@ -1,0 +1,89 @@
+# ПОЧИНЕННОЕ состояние кейса 1. Оба дефекта закрыты.
+#
+# Что изменилось и почему:
+#
+# maxUnavailable: 0 + maxSurge: 1
+#   Kubernetes сначала поднимает НОВЫЙ под и дожидается, пока он станет Ready,
+#   и только потом сносит старый. В любой момент времени живых подов не меньше,
+#   чем replicas. Стоимость: на время выката в кластере на 1 под больше.
+#
+# readinessProbe
+#   Пока httpd не начал слушать порт, под не попадает в endpoints Service.
+#   Именно это делает maxUnavailable: 0 осмысленным: «дождаться Ready»
+#   работает только если Ready означает «действительно готов».
+#
+#   Вот почему два дефекта связаны: maxUnavailable: 0 без readinessProbe
+#   бесполезен — новый под «готов» через секунду после старта контейнера,
+#   kubelet сносит старый, и трафик идёт в мёртвый порт.
+#   А readinessProbe без maxUnavailable: 0 не спасает от того, что все
+#   старые поды убиты разом.
+#
+# livenessProbe — НЕ про эту проблему
+#   Она перезапускает зависший контейнер, а не убирает его из балансировки.
+#   initialDelaySeconds: 20 здесь обязателен и это отдельная грабля:
+#   поставь меньше 15 (времени старта приложения) — kubelet начнёт убивать
+#   под ровно в момент, когда тот ещё поднимается, и получится CrashLoopBackOff
+#   на ровном месте. Liveness должна быть СТРОГО снисходительнее readiness.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /www
+              echo ok > /www/index.html
+              sleep 15
+              exec httpd -f -p 8080 -h /www
+          ports:
+            - containerPort: 8080
+
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 3
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 8080

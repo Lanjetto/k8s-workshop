@@ -1,0 +1,83 @@
+# ШАГ «ПОЧТИ ПОЧИНИЛ» №3 — профиль безопасности собран целиком, и это уже
+# починка первой половины кейса (README.md, 4.1 применяет ровно этот файл).
+#
+# Отличие от steps/2-nonroot.yaml — ОДНО поле: fsGroup.
+#
+# Почему его не хватало. runAsUser говорит, ОТ КОГО бежит процесс. fsGroup
+# говорит, ЧЬИ файлы ему достаются: kubelet при монтировании тома меняет
+# группу-владельца тома на fsGroup. Без этого том остаётся root:root, и
+# процесс с uid 1001 не может в него писать — притом что формально «всё
+# настроено правильно» и никакая политика ничего не нарушает.
+#
+# Это самый частый вид аварии при переводе сервиса на non-root: приложение
+# перестаёт видеть свои же данные. И самый непохожий на остальные: причину
+# не видно ни в манифесте (там всё верно), ни в статусе пода (под Running,
+# просто падает), — только в логе самого приложения.
+#
+# Вторая половина кейса (RBAC) этим файлом не чинится: serviceAccountName
+# здесь по-прежнему не задан. Так сделано намеренно — половины независимы.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: busybox:1.37
+          command: ["sh", "/etc/app/run.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          # Проба готовности — и она здесь не для красоты.
+          #
+          # Файл /www/healthz приложение заводит ТОЛЬКО после того, как
+          # убедилось, что умеет писать в свой том. Значит «готов» здесь
+          # означает «действительно работает», а не «процесс запустился».
+          #
+          # Без пробы падающий под успевает побыть Ready доли секунды (у
+          # контейнера без пробы готовность наступает сразу после старта), и
+          # выкат считает такую замену удачной — убивая старые поды. Кейс
+          # после этого разваливается: вместо «сервис работает, а выкат
+          # стоит» на экране пустой Deployment.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: script
+              mountPath: /etc/app
+            - name: www
+              mountPath: /www
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-api
+        - name: script
+          configMap:
+            name: app-script
+            defaultMode: 0555
+        - name: www
+          emptyDir: {}

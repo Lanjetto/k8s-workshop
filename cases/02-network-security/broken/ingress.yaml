@@ -1,0 +1,81 @@
+# Вход снаружи: Ingress + Certificate. Вторая, НЕЗАВИСИМАЯ часть кейса 2.
+#
+# Независимость настоящая и её стоит проговорить: политики не влияют на выпуск
+# сертификата, а сертификат не влияет на политики. В кейсе 1 так же были
+# разведены выкат и PodDisruptionBudget.
+#
+# ДЕФЕКТ 4 — Certificate ссылается на ClusterIssuer, которого не существует.
+#
+#   В кластере заведён один подписант — `workshop-ca` (его ставит issuer.yaml
+#   этого кейса). Манифест же ссылается на
+#   `letsencrypt-prod`, потому что он приехал копипастом из статьи про
+#   Let's Encrypt. Certificate создаётся, cert-manager его видит, идёт
+#   подписывать — и не находит issuer.
+#
+#   Это НЕ искусственная опечатка кейса. Это ошибка №1 в реальной жизни, и у
+#   неё есть объективная причина: в kind ACME недостижим в принципе (ACME
+#   требует публичный DNS и доступный извне HTTP-01/DNS-01, а локальный
+#   кластер интернету не виден). То есть «поставить Let's Encrypt» — первое,
+#   что хочется сделать, и первое, что здесь не работает.
+#
+#   Симптом снаружи — САМЫЙ коварный из всех: сайт открывается, HTTP работает,
+#   ошибок в кластере нет, а браузер ругается на сертификат. Причина в том, что
+#   ingress-nginx при отсутствии секрета молча подставляет свою заглушку
+#   «Kubernetes Ingress Controller Fake Certificate» и продолжает работать.
+#   Никакой ошибки нигде не видно — надо своими руками посмотреть, ЧЕЙ
+#   сертификат отдаётся.
+
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  annotations:
+    # Таймауты проксирования уменьшены с дефолтных 60с НАМЕРЕННО.
+    #
+    # Заблокированный Calico трафик отбрасывается молча (DROP), поэтому
+    # попытка соединиться с api висит до таймаута. С дефолтным значением
+    # `curl` на сцене вернётся через минуту — и это будет не демонстрация, а
+    # пауза. Три секунды показывают то же самое, но сразу.
+    #
+    # Мостик к разговору: DROP и REJECT выглядят снаружи по-разному. «Отказано
+    # сразу» и «висит» — это два разных диагноза, и по одному только внешнему
+    # симптому их не различить.
+    # `proxy-next-upstream-tries: 1` — не украшение, а арифметика сцены.
+    # По умолчанию nginx делает 3 попытки, и с таймаутом 3с запрос снаружи
+    # висит 9 секунд вместо трёх. Проверено на стенде 24.09.2026.
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3"
+    nginx.ingress.kubernetes.io/proxy-next-upstream-tries: "1"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - shop.workshop.local
+      secretName: shop-tls
+  rules:
+    - host: shop.workshop.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: shop-tls
+spec:
+  secretName: shop-tls
+  commonName: shop.workshop.local
+  dnsNames:
+    - shop.workshop.local
+  issuerRef:
+    # ← ДЕФЕКТ: такого ClusterIssuer в кластере нет. Список живых:
+    #   kubectl get clusterissuer
+    name: letsencrypt-prod
+    kind: ClusterIssuer

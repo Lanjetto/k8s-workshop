@@ -1,0 +1,48 @@
+# kind-кластер для воркшопа «k8s: cases».
+#
+# Почему именно так, а не дефолтным `kind create cluster`:
+#
+# 1. disableDefaultCNI + Calico. Дефолтный CNI в kind (kindnet) НЕ умеет
+#    NetworkPolicy: манифест применяется, `kubectl get netpol` его показывает,
+#    а трафик ходит как ходил. На кейсе 2 это выглядит как «политика не работает»,
+#    хотя работает ровно то, что поставили. Поэтому Calico — обязателен.
+#    podSubnet обязан совпадать с тем, что ждёт манифест Calico (192.168.0.0/16).
+#
+# 2. Проброс 80/443 на control-plane. Нужен ingress-nginx: он цепляется к
+#    hostPort через DaemonSet на ноде с лейблом ingress-ready=true.
+#
+# 3. Три ноды. Двух воркеров достаточно, чтобы PodDisruptionBudget в кейсе 1
+#    имел смысл (на одной ноде drain упирается в PDB и кейс не демонстрируется).
+#
+# Ресурсы: три ноды kind — это ~1.5 ГБ на docker-контейнеры, плюс Calico,
+# ingress, cert-manager, CSI и metrics-server ещё ~0.7 ГБ. Практический
+# минимум для хоста — 4 CPU и 8 ГБ RAM. Если хост начнёт свопиться — ноды
+# уйдут в NotReady, и это будет выглядеть как поломка кейса.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: workshop
+
+networking:
+  disableDefaultCNI: true
+  podSubnet: "192.168.0.0/16"
+  serviceSubnet: "10.96.0.0/12"
+
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"
+    extraPortMappings:
+      - containerPort: 80
+        hostPort: 80
+        protocol: TCP
+      - containerPort: 443
+        hostPort: 443
+        protocol: TCP
+
+  - role: worker
+  - role: worker

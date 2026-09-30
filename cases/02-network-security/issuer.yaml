@@ -1,0 +1,76 @@
+# Подписант сертификатов для кейса 2. Это НЕ дефект и НЕ часть починки —
+# это инфраструктура, которая должна существовать до начала кейса. Применяется
+# вместе с ним: `kubectl apply -f cases/02-network-security/issuer.yaml`.
+#
+# ЗАЧЕМ ЭТОТ ФАЙЛ ВООБЩЕ НУЖЕН.
+#
+# cert-manager — это конвейер: он умеет ВЫПУСКАТЬ сертификаты, но не знает,
+# КТО их подписывает. Подписанта (Issuer / ClusterIssuer) надо завести самому,
+# и cert-manager не создаёт его «по умолчанию» и не ругается на его
+# отсутствие — он просто ждёт, пока тот появится. Отсюда весь дефект 4 кейса.
+#
+# В проде подписантом был бы ACME — Let's Encrypt. В kind
+# это невозможно, и причина объективная: ACME требует, чтобы удостоверяющий
+# центр мог дотянуться до твоего домена (HTTP-01 / DNS-01), а локальный
+# кластер интернету не виден и публичного DNS не имеет. Поэтому здесь
+# self-signed CA, и это надо сказать вслух — иначе первый же вопрос «а почему
+# браузер ругается» повиснет в воздухе.
+#
+# Смысл кейса от подмены не меняется ни на грамм: слушатели видят весь цикл
+# Certificate -> CertificateRequest -> Secret -> трафик по HTTPS. Разница
+# ровно в одном: корень недоверенный, потому что его никто, кроме нас, не
+# подписывал.
+#
+# ЦЕПОЧКА — штатная и документированная в cert-manager, из трёх объектов:
+#
+#   1. ClusterIssuer workshop-selfsigned — умеет ТОЛЬКО selfSigned,
+#      то есть подписывает сертификаты сам собой. Для клиентского трафика
+#      бесполезен (браузер такому не поверит), но идеален, чтобы завести
+#      собственный CA.
+#
+#   2. Certificate workshop-ca (isCA: true) — заказывает у №1 корневой
+#      сертификат. Результат cert-manager кладёт в Secret.
+#
+#   3. ClusterIssuer workshop-ca — теперь подписывает ВСЁ ОСТАЛЬНОЕ этим
+#      самым Secret. Именно на него должен ссылаться Certificate кейса.
+#
+# ПОЧЕМУ Certificate лежит в namespace cert-manager, а не в case02.
+# Secret для ca-issuer'а ищется в namespace, который cert-manager считает
+# «своим» (`--cluster-resource-namespace`, по умолчанию — тот, где он сам
+# установлен). Положить сертификат CA рядом с приложением технически можно —
+# через флаг `secretName: <ns>/<name>` — но тогда секрет с корневым ключом
+# окажется в namespace, который сносится вместе с кейсом. Не надо так.
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: workshop-selfsigned
+spec:
+  selfSigned: {}
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: workshop-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: workshop-ca
+  secretName: workshop-ca-secret
+  duration: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: workshop-selfsigned
+    kind: ClusterIssuer
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: workshop-ca
+spec:
+  ca:
+    secretName: workshop-ca-secret

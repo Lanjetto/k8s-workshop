@@ -1,0 +1,41 @@
+# ФИКС кейса 2, часть 2 — TLS.
+#
+# Одна строка: issuerRef.name. Больше в этом файле менять нечего — ни Ingress,
+# ни dnsNames, ни secretName не были сломаны.
+#
+# Именно это и есть содержание кейса: «почему не работает сертификат» — не
+# всегда про сертификат. Здесь сертификата не было вообще, потому что
+# cert-manager не угадывает подписанта по имени и не падает, если его нет.
+# Он аккуратно ждёт.
+#
+# ЧТО СМОТРЕТЬ ПОСЛЕ ПРИМЕНЕНИЯ (цепочка cert-manager, вся видна в kubectl):
+#
+#   Certificate shop-tls        READY=True   ← было False
+#     -> CertificateRequest     READY=True
+#       -> Secret shop-tls      создан       ← раньше его не существовало
+#         -> Ingress api        подхватил его и отдаёт уже свой сертификат
+#
+# Пока Secret не появился, ingress-nginx молча отдаёт СВОЮ заглушку
+# «Kubernetes Ingress Controller Fake Certificate». Ошибки при этом нет ни
+# одной — ни в кластере, ни в логах, ни в ответе HTTP. Отсюда главный
+# практический вывод кейса: в TLS нельзя верить факту «сайт открылся».
+# Надо посмотреть, ЧЕЙ сертификат отдаётся.
+
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: shop-tls
+spec:
+  secretName: shop-tls
+  # commonName задан ради читаемости вывода `openssl x509`: без него
+  # сертификат опознаётся ТОЛЬКО по SAN, и в терминале строка subject
+  # остаётся пустой — на сцене это выглядит как недоделка.
+  # На доверие это не влияет: браузеры уже давно смотрят в SAN, а не в CN.
+  commonName: shop.workshop.local
+  dnsNames:
+    - shop.workshop.local
+  issuerRef:
+    # ← ФИКС. Этот ClusterIssuer действительно существует: его заводит
+    # issuer.yaml этого кейса вместе с собственным CA.
+    name: workshop-ca
+    kind: ClusterIssuer

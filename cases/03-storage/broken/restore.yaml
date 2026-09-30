@@ -1,0 +1,77 @@
+# Восстановление базы из снапшота — СЛОМАННАЯ версия.
+#
+# dataSource — это способ сказать «создай том не с нуля, а из вот этого
+# снапшота». Kubernetes скопирует данные снапшота в новый том.
+#
+# ЛОВУШКА, И ОНА В ОДНОЙ СТРОКЕ: storage: 1Gi.
+#   Размер здесь — не «сколько места выделить под данные», а «какого размера
+#   том мне нужен». Снапшот снят с тома, который уже был расширен до 2Gi,
+#   поэтому 1Gi — это МЕНЬШЕ, чем содержимое снапшота. Провизионер такое
+#   отвергает: он физически не может уложить 2Gi данных в том на 1Gi.
+#
+#   Отвергает он это НЕ молча, но причину надо искать в С ОБЫТИЯХ. В самом
+#   объекте PVC её нет вообще: у висящей заявки список условий ПУСТ
+#   (проверено: `-o jsonpath='{.status.conditions}'` → `[]`), а `get pvc`
+#   показывает голое `Pending` без единого слова о причине.
+#
+#   И события приходят АСИНХРОННО: замерено 25.09.2026 от ~1 до 35 секунд
+#   после создания PVC, зависит от того, прогрет ли контроллер. Первые
+#   секунды там бывают только Normal. Отсюда симптом «висит и ничего не
+#   говорит» — и отсюда же запрет делать вывод по первому взгляду.
+#
+#   Сообщение (появляется позже):
+#     requested volume size 1073741824 is less than the size 2147483648
+#     for the source snapshot db-backup
+#
+#   Читается это буквально — сравнить надо размер запрошенного тома
+#   с restoreSize снапшота:
+#     kubectl get volumesnapshot db-backup -o jsonpath='{.status.restoreSize}'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-restore
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  dataSource:
+    name: db-backup
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+---
+# Под, который показывает, что именно восстановилось. Пока PVC не привязан,
+# под стоит в Pending с «pod has unbound immediate PersistentVolumeClaims» —
+# это второй, независимый симптом той же причины.
+#
+# Нужен не для красоты: КОЛИЧЕСТВО ЗАПИСЕЙ СРАЗУ ПОКАЗЫВАЕТ ДВЕ ВЕЩИ
+#   1. что снапшот приехал с данными, а не пустым;
+#   2. что он приехал с данными НА МОМЕНТ СЪЁМКИ — записей меньше, чем в живой
+#      базе. Снапшот — это точка во времени, а не «копия сейчас».
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-restore-check
+spec:
+  restartPolicy: Never
+  containers:
+    - name: check
+      image: busybox:1.37
+      command:
+        - sh
+        - -c
+        - |
+          echo "восстановленный том, записей: $(wc -l < /data/records.txt)"
+          echo "последние записи:"
+          tail -3 /data/records.txt
+          echo "проверка живости тома:"
+          touch /data/written-by-restore && echo "  запись в том прошла"
+          sleep 3600
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: db-restore

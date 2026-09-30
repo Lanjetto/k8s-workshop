@@ -1,0 +1,28 @@
+# СОБЛАЗН: выдать права не тому, кто их просит, а тому, под кем сервис
+# уже бежит. Одна команда, перезапускать ничего не надо — заработает
+# моментально, потому что RBAC проверяется на каждом запросе, а не «при
+# выдаче».
+#
+# Именно поэтому это самая частая «починка» такой аварии: она быстрее
+# правильной и снаружи неотличима. Сервис начинает читать свой конфиг.
+#
+# ЧЕГО НЕ ВИДНО СНАРУЖИ: `view` — это не «прочитать один ConfigMap».
+# Это весь обзор namespace-а: поды, их логи, эндпоинты, PVC, события.
+# В том числе `pods/log` — а в логах чужих подов регулярно лежат токены
+# и пароли. Учётка `default` при этом не «учётка сервиса api»: под неё
+# поедет ЛЮБОЙ под этого namespace-а, которому не назначили свою.
+#
+# Проверяется не на глаз, а прибором: `kubectl auth can-i --list -n case04
+# --as=system:serviceaccount:case04:default` — см. README.md, раздел 3.4.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: default-view
+subjects:
+  - kind: ServiceAccount
+    name: default
+    namespace: case04
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io

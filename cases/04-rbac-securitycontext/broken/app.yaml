@@ -1,0 +1,191 @@
+# Кейс 4, сломанное состояние: сервис api «как его написали по умолчанию».
+#
+# ЧТО ЗДЕСЬ НЕ ТАК — и почему это НЕ видно снаружи.
+#
+#   * У пода НЕТ securityContext. Значит контейнер поедет от root: так
+#     устроено по умолчанию, образ никакого USER не объявляет. Сервис при
+#     этом работает, отвечает 200 и ни на что не жалуется. Проблема
+#     проявится не здесь, а когда namespace ужесточат, — и проявится не
+#     ошибкой приложения, а вставшим выкатом.
+#
+#   * У пода НЕ задан serviceAccountName. Значит он поедет под служебной
+#     учёткой `default`, у которой в кластере нет никаких прав. А сервису
+#     нужен доступ в API: он читает оттуда свой конфиг. Это второй дефект,
+#     он живёт своей жизнью и с первым не связан никак.
+#
+#   * Том /data никто не готовил к запуску от не-root. Пока процесс root —
+#     всё хорошо. Как только его переведут на uid 1001, выяснится, что
+#     каталог принадлежит root и писать в него нельзя.
+#
+# Три дефекта, три разных слоя, и ни один из них не выглядит как «упало».
+# На этом стоит весь кейс.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  # Фича-флаг. Лежит здесь намеренно: сервис ходит за ним В API, и для
+  # этого ему нужны права (RBAC). Примонтированный ConfigMap прав не
+  # требует вообще — и это стоит проговорить вслух, потому что «доступ к
+  # конфигу» и «доступ к API» в головах обычно слиты в одно.
+  flag: "on"
+  rate: "5"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-script
+data:
+  # Логика приложения — здесь, а не в манифесте пода, намеренно: так все
+  # варианты пода (broken/, steps/, fixed/) отличаются друг от друга ТОЛЬКО
+  # блоком securityContext. Их надо читать глазами и видеть разницу сразу,
+  # а не выискивать её в сорока строках shell-а.
+  run.sh: |
+    set -u
+    SA=/var/run/secrets/kubernetes.io/serviceaccount
+    API="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}"
+    URL="$API/api/v1/namespaces/$(cat $SA/namespace)/configmaps/app-config"
+
+    echo "старт: $(id)"
+
+    # ── канал 1: ДАННЫЕ ─────────────────────────────────────────────────
+    # Пишем в том. Первая же попытка отвечает на вопрос, может ли процесс
+    # пользоваться своим томом. Отказ здесь — не «ошибка приложения», а
+    # несовпадение владельца файлов с тем, от кого бежит процесс. Поэтому
+    # процесс честно падает: сервис без своего тома работать не умеет, и
+    # делать вид, что умеет, хуже, чем не стартовать.
+    if ! printf '' >> /data/events.log 2>/dev/null; then
+      echo "ПАДЕНИЕ: том /data недоступен на запись — $(id)"
+      exit 1
+    fi
+
+    # ── канал 2: КОНФИГ ИЗ API ──────────────────────────────────────────
+    # Кто мы такие для кластера, решает токен этой служебной учётки, а не
+    # то, что написано в манифесте.
+    echo ok > /www/healthz
+    printf 'api uid=%s старт\n' "$(id -u)" > /www/index.html
+    httpd -f -p 8080 -h /www &
+
+    # Печатаем ТОЛЬКО смену состояния, а не каждый замер. Урок кейса 2 в
+    # действии: у прибора, который сыплет показаниями, хвост лога перестаёт
+    # что-либо значить. Здесь последняя строка про CONFIG — это и есть
+    # текущее состояние канала.
+    state=""
+    n=0
+    while true; do
+      if out=$(wget -S -O /dev/null --no-check-certificate \
+                 --header="Authorization: Bearer $(cat $SA/token)" \
+                 "$URL" 2>&1); then
+        short="ok"
+        new="CONFIG ok: конфиг прочитан из API"
+      else
+        code=$(printf '%s' "$out" | sed -n 's|.*HTTP/1.1 \([0-9]*\).*|\1|p' | tail -1)
+        short="HTTP ${code:-нет ответа}"
+        new="CONFIG FAIL: $short"
+      fi
+      if [ "$new" != "$state" ]; then
+        state="$new"
+        echo "$new"
+        printf 'api uid=%s — %s\n' "$(id -u)" "$new" > /www/index.html
+      fi
+
+      n=$((n+1))
+      printf '%s запись %s\n' "$(date +%H:%M:%S)" "$n" >> /data/events.log
+      # Редкий heartbeat: чтобы молчание прибора нельзя было спутать с его
+      # смертью — то же решение, что в кейсе 2.
+      #
+      # Слово CONFIG здесь НЕ употребляется намеренно. Иначе heartbeat
+      # подменяет показание канала: тот, кто читает «последнюю строку про
+      # CONFIG», получает строку про количество записей — с тем же текстом
+      # состояния внутри. Поймано на прогоне 25.09.2026.
+      if [ $((n % 10)) -eq 0 ]; then
+        echo "heartbeat: записей в /data $n, канал конфига: $short"
+      fi
+      sleep 3
+    done
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-api
+spec:
+  accessModes:
+    - ReadWriteOnce
+  # csi-hostpath-sc — StorageClass стенда, тот же, что в кейсе 3. Его том
+  # монтируется с владельцем root:root 0755 — именно поэтому перевод сервиса
+  # на non-root упирается сюда, а не проходит гладко.
+  storageClassName: csi-hostpath-sc
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      # serviceAccountName ЗДЕСЬ ОТСУТСТВУЕТ НАМЕРЕННО — см. шапку файла.
+      # securityContext ЗДЕСЬ ТОЖЕ ОТСУТСТВУЕТ — и это второй дефект.
+      containers:
+        - name: api
+          image: busybox:1.37
+          command: ["sh", "/etc/app/run.sh"]
+          ports:
+            - containerPort: 8080
+          # Проба готовности — и она здесь не для красоты.
+          #
+          # Файл /www/healthz приложение заводит ТОЛЬКО после того, как
+          # убедилось, что умеет писать в свой том. Значит «готов» здесь
+          # означает «действительно работает», а не «процесс запустился».
+          #
+          # Без пробы падающий под успевает побыть Ready доли секунды (у
+          # контейнера без пробы готовность наступает сразу после старта), и
+          # выкат считает такую замену удачной — убивая старые поды. Кейс
+          # после этого разваливается: вместо «сервис работает, а выкат
+          # стоит» на экране пустой Deployment.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: script
+              mountPath: /etc/app
+            # /www — документ-рут httpd. Отдельным томом, потому что корень
+            # контейнера принадлежит root: от uid 1001 в нём нельзя создать
+            # даже каталог. emptyDir же монтируется writable всем.
+            - name: www
+              mountPath: /www
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-api
+        - name: script
+          configMap:
+            name: app-script
+            defaultMode: 0555
+        - name: www
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+  ports:
+    - port: 80
+      targetPort: 8080

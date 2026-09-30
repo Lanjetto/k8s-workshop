@@ -1,0 +1,49 @@
+# Фикс восстановления: ровно то же самое, но размер тома не меньше снапшота.
+#
+# Единственное отличие от broken/restore.yaml — storage: 2Gi вместо 1Gi.
+# Правило, которое стоит унести: размер тома при восстановлении считается
+# НЕ от того, сколько данных вы ожидаете, а от restoreSize снапшота.
+# Восстановить в том меньше снапшота нельзя — и это защита, а не придирка:
+# иначе данные обрезались бы молча.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-restore
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+  dataSource:
+    name: db-backup
+    kind: VolumeSnapshot
+    apiGroup: snapshot.storage.k8s.io
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: db-restore-check
+spec:
+  restartPolicy: Never
+  containers:
+    - name: check
+      image: busybox:1.37
+      command:
+        - sh
+        - -c
+        - |
+          echo "восстановленный том, записей: $(wc -l < /data/records.txt)"
+          echo "последние записи:"
+          tail -3 /data/records.txt
+          echo "проверка живости тома:"
+          touch /data/written-by-restore && echo "  запись в том прошла"
+          sleep 3600
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: db-restore

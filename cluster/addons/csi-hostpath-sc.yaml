@@ -1,0 +1,31 @@
+# StorageClass для кейса 3.
+#
+# ЭТОГО ФАЙЛА НЕТ В АПСТРИМЕ. csi-driver-host-path поставляет драйвер,
+# CSIDriver и VolumeSnapshotClass — но не StorageClass. Без него PVC просто
+# некуда привязаться.
+#
+# Зачем он нужен, если в kind уже есть local-path-provisioner:
+#
+# allowVolumeExpansion: true
+#     local-path (дефолтный StorageClass в kind) расширять тома НЕ УМЕЕТ.
+#     Пытаешься увеличить PVC — получаешь
+#       "persistentvolumeclaims ... is forbidden: only dynamically provisioned
+#        pvc can be resized and the storageclass that provisions the pvc must
+#        support expansion"
+#     С этим StorageClass — умеет, и под живёт, и ФС растягивается на лету.
+#
+# Имя provisioner'а должно совпадать с драйвером, зарегистрированным через
+# csi-hostpath-driverinfo.yaml: hostpath.csi.k8s.io
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: csi-hostpath-sc
+  annotations:
+    # Делаем дефолтным, чтобы в кейсе 3 не приходилось в каждом PVC писать
+    # storageClassName. Если понадобится показать классы явно — снять аннотацию.
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: hostpath.csi.k8s.io
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true

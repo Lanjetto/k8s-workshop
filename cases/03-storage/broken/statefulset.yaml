@@ -1,0 +1,91 @@
+# База магазина: StatefulSet, том через volumeClaimTemplates.
+#
+# ПОЧЕМУ STATEFULSET, А НЕ DEPLOYMENT С PVC РУКАМИ.
+#   volumeClaimTemplates — единственный декларативный способ сказать «каждой
+#   реплике свой том». Kubernetes сам создаёт PVC (`data-db-0`, `data-db-1`, ...)
+#   и НИКОГДА не удаляет их при удалении пода. Отсюда два свойства, которые
+#   в кейсе важны:
+#     * том переживает пересоздание пода — данные не теряются;
+#     * существующий PVC StatefulSet НЕ переписывает. Правка в шаблоне
+#       до живых томов не доезжает (см. README, «Дефект 2»).
+#
+# ПОЧЕМУ replicas: 0 — НЕ ОПЕЧАТКА.
+#   Это часть сломанного состояния. Ночью базу остановили на профилактику,
+#   и это и есть причина, по которой расширение тома не применилось:
+#   растягивание файловой системы делает нода В МОМЕНТ МОНТИРОВАНИЯ тома,
+#   а монтировать нечего, пока под не запущен. Том (PV) при этом уже
+#   расширен — расходится только то, что видит приложение.
+#
+#   Подробно — grab «расширение PVC не завершается без запущенного пода»
+#   в HANDOFF.md и раздел «Почему расширение идёт в два шага» в README.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+spec:
+  serviceName: db
+  replicas: 0
+  selector:
+    matchLabels:
+      app: db
+  template:
+    metadata:
+      labels:
+        app: db
+    spec:
+      containers:
+        - name: db
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /data
+              # Первый запуск на пустом томе заводит «базу». На восстановленном
+              # из снапшота томе файл уже есть — и это ровно то, чем мы
+              # доказываем, что снапшот приехал с данными, а не пустым.
+              if [ ! -s /data/records.txt ]; then
+                echo "order-0001" > /data/records.txt
+                echo "база создана заново (том был пуст)"
+              fi
+              n=$(wc -l < /data/records.txt)
+              echo "база открыта, записей: $n"
+              while true; do
+                n=$((n+1))
+                printf 'order-%04d\n' "$n" >> /data/records.txt
+                echo "записано order-$(printf '%04d' "$n"), всего записей: $n"
+                sleep 5
+              done
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      # timeouts / graceful — не нужны, база учебная
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            # 2Gi — размер, с которым база работала, пока не кончилось место.
+            # Ночью дежурный расширил том до 3Gi ЧЕРЕЗ PATCH, а не правкой
+            # этого файла, и правильно сделал: см. `step template` —
+            # volumeClaimTemplates у живого StatefulSet неизменяемы.
+            #
+            # Здесь значение остаётся прежним намеренно. Манифест описывает
+            # «как было», а расхождение с реальностью (PVC просит 3Gi, выдано
+            # 2Gi) и есть дефект 1 — его видно в `kubectl get pvc` только
+            # если сравнить spec с колонкой CAPACITY.
+            storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+spec:
+  clusterIP: None
+  selector:
+    app: db
+  ports:
+    - port: 5432

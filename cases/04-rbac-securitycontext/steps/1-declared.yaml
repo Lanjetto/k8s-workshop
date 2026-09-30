@@ -1,0 +1,79 @@
+# ШАГ «ПОЧТИ ПОЧИНИЛ» №1 — ровно то, что просит текст ошибки.
+#
+# PodSecurity в отказе перечисляет четыре требования, и здесь добавлены
+# ровно эти четыре поля, слово в слово:
+#
+#   allowPrivilegeEscalation != false  →  allowPrivilegeEscalation: false
+#   unrestricted capabilities          →  capabilities.drop: ["ALL"]
+#   runAsNonRoot != true               →  runAsNonRoot: true
+#   seccompProfile                     →  seccompProfile.type: RuntimeDefault
+#
+# Политика останется довольна. А под НЕ ЗАПУСТИТСЯ — по причине, которой
+# в этом списке нет и быть не может. Разбор — README.md, разделы 2.2 и 3.1.
+#
+# Отличие от broken/app.yaml — только в блоке securityContext ниже.
+# Наложение: kubectl apply, поэтому возврат к сломанному состоянию — это
+# обычный `kubectl apply -f broken/app.yaml`, а не пересоздание пода.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      # ── ЧЕТЫРЕ ПОЛЯ ИЗ ТЕКСТА ОТКАЗА ────────────────────────────────────
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: busybox:1.37
+          command: ["sh", "/etc/app/run.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+          # Проба готовности — и она здесь не для красоты.
+          #
+          # Файл /www/healthz приложение заводит ТОЛЬКО после того, как
+          # убедилось, что умеет писать в свой том. Значит «готов» здесь
+          # означает «действительно работает», а не «процесс запустился».
+          #
+          # Без пробы падающий под успевает побыть Ready доли секунды (у
+          # контейнера без пробы готовность наступает сразу после старта), и
+          # выкат считает такую замену удачной — убивая старые поды. Кейс
+          # после этого разваливается: вместо «сервис работает, а выкат
+          # стоит» на экране пустой Deployment.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: script
+              mountPath: /etc/app
+            - name: www
+              mountPath: /www
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-api
+        - name: script
+          configMap:
+            name: app-script
+            defaultMode: 0555
+        - name: www
+          emptyDir: {}

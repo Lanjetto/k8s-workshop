@@ -1,0 +1,19 @@
+# Рабочие материалы воркшопа — в репозиторий не идут.
+HANDOFF.md
+k8s text.txt
+testone/
+
+# Кейсы, не вошедшие в публичную часть.
+cases/05-gitops/
+cases/06-observability/
+cluster/addons/argocd.sh
+
+# Резервные копии перед сборкой репозитория.
+_archive-*
+
+# Служебное.
+.verify/
+.claude/
+.DS_Store
+Thumbs.db
+*.swp

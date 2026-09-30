@@ -1,0 +1,100 @@
+# Кейс 4, починенное состояние целиком: тот же Deployment, что в
+# broken/app.yaml, плюс две вещи — профиль безопасности и своя учётка.
+# Ничего другого не менялось: ни образ, ни команда, ни том, ни реплики.
+#
+#   ДОБАВЛЕНО 1: securityContext (pod + container)  → профиль restricted
+#   ДОБАВЛЕНО 2: serviceAccountName: api            → под ходит под своей
+#                                                     служебной учёткой
+#
+# Разница — 12 строк, и обе половины кейса держатся на них.
+#
+# Промежуточные состояния (они же «почти починил») — в steps/. Это эталон
+# правильного состояния: применяется командой
+#
+#     kubectl apply -n case04 -f cases/04-rbac-securitycontext/fixed/app.yaml
+#
+# а проверяется по ЖИВОМУ поду, а не по манифесту — см. README.md, раздел 4.2.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      # ── ДОБАВЛЕНО 2 ─────────────────────────────────────────────────────
+      # Кто мы для кластера. Без этой строки под предъявляет учётку
+      # `default`, и никакие права, выданные учётке `api`, до него не
+      # доедут. Идентичность и права — разные объекты, и это главный урок
+      # второй половины кейса.
+      serviceAccountName: api
+
+      # ── ДОБАВЛЕНО 1 ─────────────────────────────────────────────────────
+      # Профиль безопасности. Четыре поля из требований restricted плюс три,
+      # которые нужны, чтобы это не просто «соответствовало бумаге», а
+      # работало:
+      #
+      #   runAsNonRoot + runAsUser + runAsGroup — от кого бежит процесс.
+      #     Одного runAsNonRoot мало: это ЗАЯВЛЕНИЕ «не пускай от root», и
+      #     с образом без USER оно превращается в отказ стартовать.
+      #   fsGroup — чьи файлы ему достаются. Без этого том остаётся
+      #     root:root, и uid 1001 не может в него писать.
+      #   allowPrivilegeEscalation, capabilities.drop, seccompProfile —
+      #     собственно требования политики.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: busybox:1.37
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          command: ["sh", "/etc/app/run.sh"]
+          ports:
+            - containerPort: 8080
+          # Проба готовности — и она здесь не для красоты.
+          #
+          # Файл /www/healthz приложение заводит ТОЛЬКО после того, как
+          # убедилось, что умеет писать в свой том. Значит «готов» здесь
+          # означает «действительно работает», а не «процесс запустился».
+          #
+          # Без пробы падающий под успевает побыть Ready доли секунды (у
+          # контейнера без пробы готовность наступает сразу после старта), и
+          # выкат считает такую замену удачной — убивая старые поды. Кейс
+          # после этого разваливается: вместо «сервис работает, а выкат
+          # стоит» на экране пустой Deployment.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 3
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: script
+              mountPath: /etc/app
+            - name: www
+              mountPath: /www
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data-api
+        - name: script
+          configMap:
+            name: app-script
+            defaultMode: 0555
+        - name: www
+          emptyDir: {}

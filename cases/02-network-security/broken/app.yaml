@@ -1,0 +1,141 @@
+# Приложение кейса 2. Топология намеренно короткая:
+#
+#   [снаружи] --80/443--> ingress-nginx (ns ingress-nginx)
+#                              |
+#                              v  Ingress shop.workshop.local
+#                         Service api --> pod api
+#                                          |
+#                                          v
+#                                  Service db --> pod db
+#
+# САМО ПРИЛОЖЕНИЕ ЗДЕСЬ НЕ СЛОМАНО. Оба пода здоровы, оба отвечают по HTTP,
+# httpd поднят. Ломается вокруг них — политиками и сертификатом. Это тот же
+# приём, что в кейсе 1: на экране «всё Running», а работать не будет.
+#
+# db — ВНУТРЕННИЙ сервис. Снаружи в него ходить нельзя, и это не декларация, а
+# проверяемое утверждение: прибор кейса отдельно стучится в db из чужого
+# namespace и обязан получать отказ не только до починки, но и ПОСЛЕ.
+# Именно на этом ловится ленивый фикс «просто снести политику» (см. README, 3.3).
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: busybox:1.37
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /www
+              echo 'api ok' > /www/index.html
+
+              # Фоновый цикл — единственная витрина канала api -> db.
+              #
+              # Печатает ТОЛЬКО отказы, но обязательно различает ДВЕ РАЗНЫЕ
+              # причины отказа, потому что это два разных дефекта политики:
+              #
+              #   * имя не резолвится          -> закрыт egress к kube-system:53
+              #   * имя есть, соединения нет   -> закрыт трафик api -> db
+              #
+              # Без этого различия на экране просто «не работает», и весь
+              # диагностический шаг («а DNS-то живой?») исчезает из кейса.
+              #
+              # timeout ... обязателен: Calico на заблокированный трафик
+              # отвечает МОЛЧАНИЕМ (DROP), а не отказом. Без таймаута и
+              # nslookup, и wget будут висеть минутами.
+              (
+                while true; do
+                  ts=$(date +%H:%M:%S)
+                  if ! timeout 2 nslookup db.case02.svc.cluster.local >/dev/null 2>&1; then
+                    echo "FAIL $ts  DNS: db.case02.svc.cluster.local не резолвится"
+                  elif ! timeout 2 wget -q -O /dev/null --timeout=2 http://db/ 2>/dev/null; then
+                    echo "FAIL $ts  api -> db: имя резолвится, соединение НЕ проходит"
+                  fi
+                  sleep 1
+                done
+              ) &
+
+              exec httpd -f -p 8080 -h /www
+          ports:
+            - containerPort: 8080
+              name: http
+          # Проб готовности здесь НЕТ намеренно.
+          #
+          # Это не забывчивость, а снятый с кейса шум: под без пробы становится
+          # Ready сразу после старта, и в кейсе не появляется второй, никак не
+          # связанной с политиками причины «под NotReady». Пробы — материал
+          # кейса 1, здесь они бы только путали.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  selector:
+    app: api
+  ports:
+    - port: 80
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db
+  labels:
+    app: db
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: db
+  template:
+    metadata:
+      labels:
+        app: db
+    spec:
+      containers:
+        - name: db
+          image: busybox:1.37
+          # В жизни здесь был бы postgres:5432. В воркшопе — busybox httpd на
+          # 8080, и вот почему: вся измерительная обвязка кейса построена на
+          # wget, который есть в busybox из коробки. На NetworkPolicy это не
+          # влияет никак — политика оперирует лейблами и портами TCP, а не
+          # протоколами выше. Разница ровно в номере порта.
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /www
+              echo 'db ok' > /www/index.html
+              exec httpd -f -p 8080 -h /www
+          ports:
+            - containerPort: 8080
+              name: http
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+spec:
+  selector:
+    app: db
+  ports:
+    - port: 80
+      targetPort: 8080

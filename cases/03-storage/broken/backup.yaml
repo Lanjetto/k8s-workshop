@@ -1,0 +1,21 @@
+# Снапшот базы, снятый ночью ПЕРЕД работами — то есть после расширения тома.
+# Это важно: снапшот фиксирует том таким, каким он был в момент съёмки.
+#
+# VolumeSnapshot — это ЗАКАЗ, а не сама копия. Реально снимок делает драйвер
+# (csi-snapshotter в поде csi-hostpathplugin), а заказывает и следит за
+# исполнением отдельный кластерный компонент — snapshot-controller.
+# Оба должны быть в кластере, иначе VolumeSnapshot просто лежит без статуса:
+# ни ошибки, ни события. Подробно — грабля №17 в HANDOFF.md.
+#
+# volumeSnapshotClassName обязателен (или класс должен быть помечен как
+# дефолтный, а он не помечен). Без него контроллер пишет в событиях
+#   SetDefaultSnapshotClassFailed: cannot find default snapshot class
+# и снапшот остаётся пустым.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: db-backup
+spec:
+  volumeSnapshotClassName: csi-hostpath-snapclass
+  source:
+    persistentVolumeClaimName: data-db-0

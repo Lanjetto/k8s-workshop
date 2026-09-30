@@ -1,0 +1,39 @@
+# Клиент, который непрерывно дёргает сервис и печатает ТОЛЬКО отказы.
+#
+# Это измерительный прибор кейса. Без него «сервис терял запросы» — слова;
+# с ним это строка с временем, которую видно на экране.
+#
+# Печатаем только FAIL, а не OK: иначе логи превращаются в простыню и
+# момент отказа в них не разглядеть. Строка FAIL печатается раз в секунду,
+# то есть каждая строка — примерно секунда недоступности.
+#
+# Обрати внимание: пробуем по имени сервиса (http://web/), а не по поду.
+# Это принципиально — мы проверяем именно то, что видит внешний клиент:
+# попадает ли запрос хоть в один живой под.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traffic-probe
+  labels:
+    app: traffic-probe
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: busybox:1.37
+      command:
+        - sh
+        - -c
+        - |
+          fails=0
+          total=0
+          echo "probe started: бью в http://web/ раз в секунду"
+          while true; do
+            total=$((total+1))
+            if ! wget -q -O /dev/null --timeout=2 http://web/ 2>/dev/null; then
+              fails=$((fails+1))
+              echo "FAIL  $(date +%H:%M:%S)   отказов: $fails из $total"
+            fi
+            sleep 1
+          done
